@@ -1,18 +1,14 @@
+import re
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from yt_dlp.utils import DownloadError
 
 from . import lyrics, youtube
 from .config import settings
-
-# Upstream headers worth forwarding to the browser (needed for seeking).
-_PASS_HEADERS = ("content-length", "content-range", "accept-ranges")
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -108,42 +104,83 @@ async def video(video_id: str, request: Request):
     return await _proxy(video_id, request, "video")
 
 
+# YouTube throttles requests without a Range header (and very long ranges) to about
+# playback speed, so mobile players time out. We always fetch upstream in ranged chunks.
+_CHUNK = 2 * 1024 * 1024
+_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
+
+
+def _parse_range(value: str | None) -> tuple[int, int | None] | None:
+    """Single 'bytes=start-end' range -> (start, end|None). Suffix ranges ('bytes=-N') unsupported -> None."""
+    if not value:
+        return None
+    m = _RANGE_RE.match(value.strip())
+    if not m or not m.group(1):
+        return None
+    return int(m.group(1)), int(m.group(2)) if m.group(2) else None
+
+
 async def _proxy(video_id: str, request: Request, kind: str):
     _check_id(video_id)
     client: httpx.AsyncClient = request.app.state.yt_http
+    asked = _parse_range(request.headers.get("range"))
+    start, end = asked if asked else (0, None)
 
-    async def open_upstream(bad=None):
-        src = await youtube.resolve(video_id, kind, bad=bad)
-        headers = dict(src.headers)
-        if rng := request.headers.get("range"):
-            headers["Range"] = rng
-        req = client.build_request("GET", src.url, headers=headers)
-        return src, await client.send(req, stream=True)
+    async def open_chunk(src, first: int, last: int):
+        headers = {**src.headers, "Range": f"bytes={first}-{last}"}
+        return await client.send(client.build_request("GET", src.url, headers=headers), stream=True)
 
+    first_last = start + _CHUNK - 1 if end is None else min(end, start + _CHUNK - 1)
     try:
-        src, upstream = await open_upstream()
+        src = await youtube.resolve(video_id, kind)
+        upstream = await open_chunk(src, start, first_last)
         if upstream.status_code == 403:  # cached URL expired -> re-resolve once
             await upstream.aclose()
-            src, upstream = await open_upstream(bad=src)
+            src = await youtube.resolve(video_id, kind, bad=src)
+            upstream = await open_chunk(src, start, first_last)
     except DownloadError as e:
         raise HTTPException(404, f"Song unavailable: {e}") from e
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Upstream error: {e}") from e
 
+    if upstream.status_code == 416:
+        total = upstream.headers.get("content-range", "").rpartition("/")[2] or "*"
+        await upstream.aclose()
+        return Response(status_code=416, headers={"content-range": f"bytes */{total}"})
     if upstream.status_code not in (200, 206):
         await upstream.aclose()
         raise HTTPException(502, f"Upstream returned {upstream.status_code}")
 
-    headers = {k: upstream.headers[k] for k in _PASS_HEADERS if k in upstream.headers}
-    headers.setdefault("accept-ranges", "bytes")
+    # Total size from "bytes a-b/TOTAL" (or content-length if upstream ignored the range).
+    cr = upstream.headers.get("content-range", "")
+    total = int(cr.rpartition("/")[2]) if "/" in cr and cr.rpartition("/")[2].isdigit() else None
+    if total is None:
+        total = int(upstream.headers.get("content-length", 0)) or None
+    last = (total - 1) if end is None else min(end, (total - 1) if total else end)
 
-    return StreamingResponse(
-        upstream.aiter_bytes(64 * 1024),
-        status_code=upstream.status_code,
-        media_type=src.mime,
-        headers=headers,
-        background=BackgroundTask(upstream.aclose),
-    )
+    async def body():
+        resp = upstream
+        pos = start
+        try:
+            while True:
+                async for piece in resp.aiter_bytes(64 * 1024):
+                    pos += len(piece)
+                    yield piece
+                await resp.aclose()
+                if last is None or pos > last or resp.status_code == 200:
+                    break  # done (200 = upstream sent the whole file at once)
+                resp = await open_chunk(src, pos, min(last, pos + _CHUNK - 1))
+                if resp.status_code not in (200, 206):
+                    break
+        finally:
+            await resp.aclose()
+
+    headers = {"accept-ranges": "bytes"}
+    if last is not None:
+        headers["content-length"] = str(last - start + 1)
+    if asked:
+        headers["content-range"] = f"bytes {start}-{last}/{total if total else '*'}"
+    return StreamingResponse(body(), status_code=206 if asked else 200, media_type=src.mime, headers=headers)
 
 
 @app.get("/api/download/{video_id}")
