@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from yt_dlp.utils import DownloadError
 
-from . import youtube
+from . import lyrics, youtube
 from .config import settings
 
 # Upstream headers worth forwarding to the browser (needed for seeking).
@@ -147,3 +147,35 @@ async def download(video_id: str):
     if not path.exists():
         raise HTTPException(500, "Conversion failed (is ffmpeg installed?)")
     return FileResponse(path, media_type="audio/mpeg", filename=f"{video_id}.mp3")
+
+
+@app.get("/api/lyrics/{video_id}")
+async def get_lyrics(
+    video_id: str,
+    request: Request,
+    title: str | None = Query(None, max_length=300, description="Override song title (skips YouTube lookup)"),
+    artist: str | None = Query(None, max_length=200),
+    duration: int | None = Query(None, ge=1, description="Seconds; used to pick the right version"),
+):
+    """Lyrics from lrclib.net. `lines` = timed lines for karaoke-style highlight (when `synced`)."""
+    _check_id(video_id)
+    if title:
+        meta = {"title": title, "artist": artist, "duration": duration}
+    else:
+        try:
+            meta = dict(await youtube.get_meta(video_id))
+        except DownloadError as e:
+            raise HTTPException(404, f"Song unavailable: {e}") from e
+        if artist:
+            meta["artist"] = artist
+        if duration:
+            meta["duration"] = duration
+
+    cache_key = f"{video_id}|{meta.get('title')}|{meta.get('artist')}|{meta.get('duration')}"
+    try:
+        found = await lyrics.find(request.app.state.http, cache_key, meta)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Lyrics service error: {e}") from e
+    if not found:
+        raise HTTPException(404, "Lyrics not found")
+    return {"id": video_id, **found}

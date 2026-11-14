@@ -114,10 +114,42 @@ def _mime_for(ext: str | None, kind: str) -> str:
     )
 
 
+# Song metadata, filled by every resolve. Used by lyrics lookup.
+_meta: dict[str, dict] = {}
+
+
+def _store_meta(video_id: str, info: dict) -> dict:
+    meta = {
+        "title": info.get("title"),
+        "track": info.get("track"),  # set for YouTube Music / auto-generated uploads
+        "artist": info.get("artist") or (info.get("artists") or [None])[0],
+        "album": info.get("album"),
+        "channel": info.get("channel") or info.get("uploader"),
+        "duration": info.get("duration"),
+    }
+    _meta[video_id] = meta
+    return meta
+
+
+def _meta_sync(video_id: str) -> dict:
+    # No format selection / availability wait needed — metadata only.
+    opts = {**_BASE_OPTS, "skip_download": True, "ignore_no_formats_error": True}
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(_watch_url(video_id), download=False, process=False)
+    return _store_meta(video_id, info)
+
+
+async def get_meta(video_id: str) -> dict:
+    if meta := _meta.get(video_id):
+        return meta
+    return await asyncio.to_thread(_meta_sync, video_id)
+
+
 def _resolve_sync(video_id: str, kind: str) -> AudioSource:
     opts = {**_BASE_OPTS, "format": _FORMATS[kind]}
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(_watch_url(video_id), download=False)
+    _store_meta(video_id, info)
     # YouTube URLs return 403 until `available_at` (usually ~4s after resolve).
     if (wait := (info.get("available_at") or 0) - time.time()) > 0:
         time.sleep(min(wait + 0.3, 15))

@@ -4,13 +4,22 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:8001" },
-    { "key": "songId", "value": "nDjloeIB3Pc" }
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8001"
+    },
+    {
+      "key": "songId",
+      "value": "nDjloeIB3Pc"
+    }
   ],
   "item": [
     {
       "name": "Health",
-      "request": { "method": "GET", "url": "{{baseUrl}}/api/health" }
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/health"
+      }
     },
     {
       "name": "Search",
@@ -29,30 +38,59 @@
         "method": "GET",
         "url": {
           "raw": "{{baseUrl}}/api/search?q=arijit singh&limit=5",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "search"],
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "search"
+          ],
           "query": [
-            { "key": "q", "value": "arijit singh" },
-            { "key": "limit", "value": "5" }
+            {
+              "key": "q",
+              "value": "arijit singh"
+            },
+            {
+              "key": "limit",
+              "value": "5"
+            }
           ]
         }
       }
     },
     {
       "name": "Song info",
-      "request": { "method": "GET", "url": "{{baseUrl}}/api/song/{{songId}}" }
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/song/{{songId}}"
+      }
     },
     {
       "name": "Stream (first 100KB)",
       "request": {
         "method": "GET",
-        "header": [{ "key": "Range", "value": "bytes=0-99999" }],
+        "header": [
+          {
+            "key": "Range",
+            "value": "bytes=0-99999"
+          }
+        ],
         "url": "{{baseUrl}}/api/stream/{{songId}}"
       }
     },
     {
+      "name": "Lyrics",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/lyrics/{{songId}}"
+      }
+    },
+    {
       "name": "Download mp3",
-      "request": { "method": "GET", "url": "{{baseUrl}}/api/download/{{songId}}" }
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/download/{{songId}}"
+      }
     }
   ]
 }
