@@ -1,0 +1,58 @@
+{
+  "info": {
+    "name": "Zoyra Music API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8001" },
+    { "key": "songId", "value": "nDjloeIB3Pc" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/health" }
+    },
+    {
+      "name": "Search",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const r = pm.response.json();",
+              "if (r.results && r.results.length) pm.collectionVariables.set('songId', r.results[0].id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/search?q=arijit singh&limit=5",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "search"],
+          "query": [
+            { "key": "q", "value": "arijit singh" },
+            { "key": "limit", "value": "5" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Song info",
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/song/{{songId}}" }
+    },
+    {
+      "name": "Stream (first 100KB)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Range", "value": "bytes=0-99999" }],
+        "url": "{{baseUrl}}/api/stream/{{songId}}"
+      }
+    },
+    {
+      "name": "Download mp3",
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/download/{{songId}}" }
+    }
+  ]
+}
