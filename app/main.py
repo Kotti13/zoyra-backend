@@ -72,7 +72,17 @@ async def search(
         raise HTTPException(502, f"Search failed: {e}") from e
     for r in results:
         r.update(_audio_links(request, r["id"]))
+    for r in results[: settings.prefetch_count]:
+        youtube.prefetch(r["id"])
     return {"query": q, "count": len(results), "results": results}
+
+
+@app.post("/api/prefetch/{video_id}", status_code=202)
+async def prefetch(video_id: str, kind: str = Query("audio", pattern="^(audio|video)$")):
+    """Warm the stream URL in the background (e.g. the next song in the queue). Returns at once."""
+    _check_id(video_id)
+    youtube.prefetch(video_id, kind)
+    return {"id": video_id, "queued": True}
 
 
 @app.get("/api/song/{video_id}")

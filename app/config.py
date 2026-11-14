@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Optional: proxy for all YouTube traffic, e.g. http://user:pass@host:port or socks5://...
     # Use a residential proxy — YouTube blocks datacenter IPs (Render, AWS, ...).
     yt_proxy: str = ""
+    # Resolve the first N search results in the background so tapping play starts fast.
+    prefetch_count: int = 5
+    prefetch_concurrency: int = 3
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -95,6 +95,7 @@ class AudioSource:
     artist: str | None
     duration: int | None
     expires_at: float
+    available_at: float = 0.0
 
 
 _cache: dict[tuple[str, str], AudioSource] = {}
@@ -152,10 +153,10 @@ def _resolve_sync(video_id: str, kind: str) -> AudioSource:
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(_watch_url(video_id), download=False)
     _store_meta(video_id, info)
-    # YouTube URLs return 403 until `available_at` (usually ~4s after resolve).
-    if (wait := (info.get("available_at") or 0) - time.time()) > 0:
-        time.sleep(min(wait + 0.3, 15))
     return AudioSource(
+        # YouTube URLs return 403 until `available_at` (usually ~4s after resolve);
+        # callers wait for it asynchronously so worker threads aren't held.
+        available_at=min(float(info.get("available_at") or 0) + 0.3, time.time() + 15),
         url=info["url"],
         headers=dict(info.get("http_headers") or {}),
         mime=_mime_for(info.get("ext"), kind),
@@ -172,11 +173,41 @@ async def resolve(video_id: str, kind: str = "audio", bad: AudioSource | None = 
     key = (kind, video_id)
     async with _resolve_locks.setdefault(key, asyncio.Lock()):
         src = _cache.get(key)
-        if src and src.expires_at > time.time() and src is not bad:
-            return src
-        src = await asyncio.to_thread(_resolve_sync, video_id, kind)
-        _cache[key] = src
-        return src
+        if not (src and src.expires_at > time.time() and src is not bad):
+            src = await asyncio.to_thread(_resolve_sync, video_id, kind)
+            _cache[key] = src
+    # Prefetched moments ago? Only wait out what's left of YouTube's delay.
+    if (wait := src.available_at - time.time()) > 0:
+        await asyncio.sleep(wait)
+    return src
+
+
+# ---------- prefetch (warm the cache before the user taps play) ----------
+
+_bg_tasks: set[asyncio.Task] = set()
+_prefetch_slots: asyncio.Semaphore | None = None  # created lazily inside the event loop
+
+
+def prefetch(video_id: str, kind: str = "audio") -> None:
+    """Resolve in the background; no-op if already cached. Errors are ignored."""
+    src = _cache.get((kind, video_id))
+    if src and src.expires_at > time.time() + 60:
+        return
+
+    global _prefetch_slots
+    if _prefetch_slots is None:
+        _prefetch_slots = asyncio.Semaphore(settings.prefetch_concurrency)
+
+    async def run():
+        try:
+            async with _prefetch_slots:  # typing in search fires many queries; cap background lookups
+                await resolve(video_id, kind)
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+    task = asyncio.create_task(run())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 # ---------- mp3 conversion (cached on disk) ----------

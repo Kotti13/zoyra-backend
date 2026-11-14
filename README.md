@@ -23,6 +23,7 @@ Docs: http://localhost:8000/docs
 | GET | `/api/stream/{id}` | audio (m4a/AAC), supports `Range` → seeking works |
 | GET | `/api/video/{id}` | video mp4 with sound (max 360p), supports `Range`, not saved |
 | GET | `/api/lyrics/{id}` | lyrics from lrclib.net: `{synced, lines: [{time, text}], plain, track, artist}`; 404 if not found. Optional `?title=&artist=&duration=` skips YouTube lookup (faster) |
+| POST | `/api/prefetch/{id}` | warm a song's stream in the background (returns 202 at once). Search also prefetches its top 5 results |
 | GET | `/api/download/{id}` | converted mp3 file (cached in `downloads/`) |
 | GET | `/api/health` | `{status: "ok"}` |
 
