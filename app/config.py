@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     max_search_results: int = 25
     stream_url_ttl: int = 3600
     mp3_bitrate: int = 192
+    # Optional: contents of a Netscape-format cookies.txt from a YouTube login.
+    # Helps when YouTube blocks server IPs ("Sign in to confirm you're not a bot").
+    yt_cookies: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

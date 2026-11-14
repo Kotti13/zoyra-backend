@@ -45,3 +45,12 @@ window.location.href = `${API}/api/download/${results[0].id}`;
 - Postman: import `zoyra.postman_collection.json`.
 - Stream URLs from YouTube are cached in memory (`STREAM_URL_TTL`) and re-resolved automatically on expiry (403).
 - Keep yt-dlp updated (`uv pip install -U yt-dlp`) — YouTube changes break old versions.
+
+## Deploy on Render
+1. New → Web Service → connect this repo. Runtime: **Docker** (uses `Dockerfile`, which installs ffmpeg + deno).
+2. No env vars required. Optional:
+   - `CORS_ORIGINS` – only for browser clients.
+   - `YT_COOKIES` – if logs show *"Sign in to confirm you're not a bot"*. Export cookies.txt from a logged-in YouTube session (use a throwaway account) and paste its contents. Keep it secret.
+3. Check: `https://<service>.onrender.com/api/health` → `{"status":"ok"}`.
+
+Free plan sleeps after 15 min idle (first request ~30-50s) and `downloads/` is wiped on restart.

@@ -3,6 +3,7 @@
 import asyncio
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,16 @@ def _js_runtimes() -> dict:
     return {}
 
 
+def _cookie_file() -> str | None:
+    if not settings.yt_cookies.strip():
+        return None
+    path = Path(tempfile.gettempdir()) / "zoyra_yt_cookies.txt"
+    # Env vars often lose newlines; accept literal "\n" too.
+    path.write_text(settings.yt_cookies.replace("\\n", "\n").strip() + "\n")
+    path.chmod(0o600)
+    return str(path)
+
+
 _BASE_OPTS = {
     "quiet": True,
     "no_warnings": True,
@@ -38,6 +49,8 @@ _BASE_OPTS = {
     "noplaylist": True,
     "js_runtimes": _js_runtimes(),
 }
+if cookie_path := _cookie_file():
+    _BASE_OPTS["cookiefile"] = cookie_path
 
 
 # ---------- search ----------
