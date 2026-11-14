@@ -51,6 +51,8 @@ _BASE_OPTS = {
 }
 if cookie_path := _cookie_file():
     _BASE_OPTS["cookiefile"] = cookie_path
+if settings.yt_proxy.strip():
+    _BASE_OPTS["proxy"] = settings.yt_proxy.strip()
 
 
 # ---------- search ----------

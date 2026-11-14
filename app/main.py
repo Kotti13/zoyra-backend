@@ -16,10 +16,20 @@ _PASS_HEADERS = ("content-length", "content-range", "accept-ranges")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.http = httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0, read=None), follow_redirects=True
+    timeout = httpx.Timeout(30.0, read=None)
+    # General client (lyrics etc.) — no proxy.
+    app.state.http = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    # YouTube media client. Stream URLs are tied to the IP that resolved them,
+    # so when yt-dlp uses a proxy the audio/video bytes must go through it too.
+    proxy = settings.yt_proxy.strip() or None
+    app.state.yt_http = (
+        httpx.AsyncClient(timeout=timeout, follow_redirects=True, proxy=proxy)
+        if proxy
+        else app.state.http
     )
     yield
+    if app.state.yt_http is not app.state.http:
+        await app.state.yt_http.aclose()
     await app.state.http.aclose()
 
 
@@ -100,7 +110,7 @@ async def video(video_id: str, request: Request):
 
 async def _proxy(video_id: str, request: Request, kind: str):
     _check_id(video_id)
-    client: httpx.AsyncClient = request.app.state.http
+    client: httpx.AsyncClient = request.app.state.yt_http
 
     async def open_upstream(bad=None):
         src = await youtube.resolve(video_id, kind, bad=bad)
