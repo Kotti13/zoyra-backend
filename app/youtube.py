@@ -68,7 +68,31 @@ if cookie_path := _cookie_file():
 # ---------- proxies (failover) ----------
 # YT_PROXY may hold several proxies separated by commas. YouTube blocks some IPs
 # ("confirm you're not a bot"), so we try them in turn and remember the last one that worked.
-PROXIES: list[str] = [p.strip() for p in settings.yt_proxy.split(",") if p.strip()]
+def _webshare_proxies() -> list[str]:
+    key = settings.webshare_api_key.strip()
+    if not key:
+        return []
+    import httpx  # local: only needed here
+
+    out, url = [], "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page_size=100"
+    try:
+        while url:
+            r = httpx.get(url, headers={"Authorization": f"Token {key}"}, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            out += [
+                f"http://{p['username']}:{p['password']}@{p['proxy_address']}:{p['port']}"
+                for p in data.get("results", [])
+                if p.get("valid")
+            ]
+            url = data.get("next")
+    except Exception as e:  # noqa: BLE001 - run without Webshare rather than crash
+        print(f"Webshare proxy list failed: {e}")
+    print(f"Loaded {len(out)} Webshare proxies")
+    return out
+
+
+PROXIES: list[str] = [p.strip() for p in settings.yt_proxy.split(",") if p.strip()] + _webshare_proxies()
 _good = 0
 
 _BLOCK_HINTS = (

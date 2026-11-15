@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Optional: proxy for all YouTube traffic, e.g. http://user:pass@host:port or socks5://...
     # Use a residential proxy — YouTube blocks datacenter IPs (Render, AWS, ...).
     yt_proxy: str = ""
+    # Optional: Webshare.io API key. Loads your Webshare proxy list at startup
+    # (added after any YT_PROXY entries), so replaced/new proxies need no config change.
+    webshare_api_key: str = ""
     # Optional: when set, every /api/* call (except /api/health) must send this key,
     # as header "X-Zoyra-Key" or query "?key=" (audio players can't always set headers).
     api_key: str = ""
