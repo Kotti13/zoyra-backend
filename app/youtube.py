@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 from .config import settings
 
@@ -42,8 +43,20 @@ def _cookie_file() -> str | None:
     return str(path)
 
 
+class _SilentLogger:
+    def debug(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        pass
+
+
 _BASE_OPTS = {
     "quiet": True,
+    "logger": _SilentLogger(),  # failover errors are handled; don't spam the log
     "no_warnings": True,
     "noprogress": True,
     "noplaylist": True,
@@ -51,16 +64,74 @@ _BASE_OPTS = {
 }
 if cookie_path := _cookie_file():
     _BASE_OPTS["cookiefile"] = cookie_path
-if settings.yt_proxy.strip():
-    _BASE_OPTS["proxy"] = settings.yt_proxy.strip()
+
+# ---------- proxies (failover) ----------
+# YT_PROXY may hold several proxies separated by commas. YouTube blocks some IPs
+# ("confirm you're not a bot"), so we try them in turn and remember the last one that worked.
+PROXIES: list[str] = [p.strip() for p in settings.yt_proxy.split(",") if p.strip()]
+_good = 0
+
+_BLOCK_HINTS = (
+    "not a bot",
+    "Unable to download API page",
+    "Failed to extract any player response",
+    "HTTP Error 429",
+    "HTTP Error 403",
+    "timed out",
+    "ProxyError",
+    "Tunnel connection failed",
+)
+
+
+def _blocked(e: Exception) -> bool:
+    msg = str(e)
+    return any(h in msg for h in _BLOCK_HINTS)
+
+
+_cooldown_until: dict[str, float] = {}  # proxy -> time it may be tried again
+_COOLDOWN = 600
+
+
+def _with_proxy(fn):
+    """Run fn(proxy): last good proxy first, skip recently blocked ones, fail over on blocks."""
+    global _good
+    if not PROXIES:
+        return fn(None)
+    now = time.time()
+    order = [(_good + k) % len(PROXIES) for k in range(len(PROXIES))]
+    # Cooled-down proxies first; blocked ones only as a last resort.
+    order.sort(key=lambda i: _cooldown_until.get(PROXIES[i], 0) > now)
+    last: Exception | None = None
+    for i in order:
+        try:
+            result = fn(PROXIES[i])
+        except DownloadError as e:
+            if not _blocked(e):
+                raise  # video itself unavailable: other proxies won't help
+            _cooldown_until[PROXIES[i]] = time.time() + _COOLDOWN
+            last = e
+            continue
+        _good = i
+        _cooldown_until.pop(PROXIES[i], None)
+        return result
+    raise last  # type: ignore[misc]
+
+
+def _opts(proxy: str | None, **extra) -> dict:
+    opts = {**_BASE_OPTS, **extra}
+    if proxy:
+        opts["proxy"] = proxy
+    return opts
 
 
 # ---------- search ----------
 
 def _search_sync(query: str, limit: int) -> list[dict]:
-    opts = {**_BASE_OPTS, "extract_flat": "in_playlist", "skip_download": True}
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+    def run(proxy):
+        with YoutubeDL(_opts(proxy, extract_flat="in_playlist", skip_download=True)) as ydl:
+            return ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+
+    info = _with_proxy(run)
 
     results = []
     for e in info.get("entries") or []:
@@ -96,6 +167,7 @@ class AudioSource:
     duration: int | None
     expires_at: float
     available_at: float = 0.0
+    proxy: str | None = None  # stream URLs only work from the IP that resolved them
 
 
 _cache: dict[tuple[str, str], AudioSource] = {}
@@ -136,10 +208,11 @@ def _store_meta(video_id: str, info: dict) -> dict:
 
 def _meta_sync(video_id: str) -> dict:
     # No format selection / availability wait needed — metadata only.
-    opts = {**_BASE_OPTS, "skip_download": True, "ignore_no_formats_error": True}
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(_watch_url(video_id), download=False, process=False)
-    return _store_meta(video_id, info)
+    def run(proxy):
+        with YoutubeDL(_opts(proxy, skip_download=True, ignore_no_formats_error=True)) as ydl:
+            return ydl.extract_info(_watch_url(video_id), download=False, process=False)
+
+    return _store_meta(video_id, _with_proxy(run))
 
 
 async def get_meta(video_id: str) -> dict:
@@ -149,11 +222,14 @@ async def get_meta(video_id: str) -> dict:
 
 
 def _resolve_sync(video_id: str, kind: str) -> AudioSource:
-    opts = {**_BASE_OPTS, "format": _FORMATS[kind]}
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(_watch_url(video_id), download=False)
+    def run(proxy):
+        with YoutubeDL(_opts(proxy, format=_FORMATS[kind])) as ydl:
+            return proxy, ydl.extract_info(_watch_url(video_id), download=False)
+
+    proxy, info = _with_proxy(run)
     _store_meta(video_id, info)
     return AudioSource(
+        proxy=proxy,
         # YouTube URLs return 403 until `available_at` (usually ~4s after resolve);
         # callers wait for it asynchronously so worker threads aren't held.
         available_at=min(float(info.get("available_at") or 0) + 0.3, time.time() + 15),
@@ -217,7 +293,6 @@ _dl_locks: dict[str, asyncio.Lock] = {}
 
 def _convert_sync(video_id: str, out_dir: Path) -> Path:
     opts = {
-        **_BASE_OPTS,
         "format": "bestaudio/best",
         "outtmpl": str(out_dir / f"{video_id}.%(ext)s"),
         "postprocessors": [
@@ -229,8 +304,12 @@ def _convert_sync(video_id: str, out_dir: Path) -> Path:
             {"key": "FFmpegMetadata"},
         ],
     }
-    with YoutubeDL(opts) as ydl:
-        ydl.download([_watch_url(video_id)])
+
+    def run(proxy):
+        with YoutubeDL(_opts(proxy, **opts)) as ydl:
+            ydl.download([_watch_url(video_id)])
+
+    _with_proxy(run)
     return out_dir / f"{video_id}.mp3"
 
 

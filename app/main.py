@@ -1,10 +1,11 @@
 import re
+import secrets
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from yt_dlp.utils import DownloadError
 
 from . import lyrics, youtube
@@ -15,17 +16,14 @@ async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(30.0, read=None)
     # General client (lyrics etc.) — no proxy.
     app.state.http = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
-    # YouTube media client. Stream URLs are tied to the IP that resolved them,
-    # so when yt-dlp uses a proxy the audio/video bytes must go through it too.
-    proxy = settings.yt_proxy.strip() or None
-    app.state.yt_http = (
-        httpx.AsyncClient(timeout=timeout, follow_redirects=True, proxy=proxy)
-        if proxy
-        else app.state.http
-    )
+    # YouTube media clients, one per proxy. Stream URLs are tied to the IP that
+    # resolved them, so audio/video bytes go through the same proxy as the lookup.
+    app.state.yt_http = {None: app.state.http}
+    for p in youtube.PROXIES:
+        app.state.yt_http[p] = httpx.AsyncClient(timeout=timeout, follow_redirects=True, proxy=p)
     yield
-    if app.state.yt_http is not app.state.http:
-        await app.state.yt_http.aclose()
+    for p in youtube.PROXIES:
+        await app.state.yt_http[p].aclose()
     await app.state.http.aclose()
 
 
@@ -34,10 +32,21 @@ app = FastAPI(title="Zoyra Music API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
     expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
 )
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    key = settings.api_key.strip()
+    path = request.url.path
+    if key and path.startswith("/api/") and path != "/api/health" and request.method != "OPTIONS":
+        sent = request.headers.get("x-zoyra-key") or request.query_params.get("key") or ""
+        if not secrets.compare_digest(sent.encode(), key.encode()):
+            return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    return await call_next(request)
 
 
 def _check_id(video_id: str) -> None:
@@ -52,10 +61,12 @@ async def health():
 
 def _audio_links(request: Request, video_id: str) -> dict:
     base = str(request.base_url).rstrip("/")
+    # Players load these URLs directly, so carry the key along when one is used.
+    q = f"?key={settings.api_key.strip()}" if settings.api_key.strip() else ""
     return {
-        "stream_url": f"{base}/api/stream/{video_id}",
-        "video_url": f"{base}/api/video/{video_id}",
-        "download_url": f"{base}/api/download/{video_id}",
+        "stream_url": f"{base}/api/stream/{video_id}{q}",
+        "video_url": f"{base}/api/video/{video_id}{q}",
+        "download_url": f"{base}/api/download/{video_id}{q}",
     }
 
 
@@ -132,12 +143,13 @@ def _parse_range(value: str | None) -> tuple[int, int | None] | None:
 
 async def _proxy(video_id: str, request: Request, kind: str):
     _check_id(video_id)
-    client: httpx.AsyncClient = request.app.state.yt_http
+    clients: dict = request.app.state.yt_http
     asked = _parse_range(request.headers.get("range"))
     start, end = asked if asked else (0, None)
 
     async def open_chunk(src, first: int, last: int):
         headers = {**src.headers, "Range": f"bytes={first}-{last}"}
+        client: httpx.AsyncClient = clients[src.proxy]
         return await client.send(client.build_request("GET", src.url, headers=headers), stream=True)
 
     first_last = start + _CHUNK - 1 if end is None else min(end, start + _CHUNK - 1)
