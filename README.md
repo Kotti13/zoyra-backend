@@ -52,7 +52,8 @@ window.location.href = `${API}/api/download/${results[0].id}`;
 1. New → Web Service → connect this repo. Runtime: **Docker** (uses `Dockerfile`, which installs ffmpeg + deno).
 2. No env vars required. Optional:
    - `CORS_ORIGINS` – only for browser clients.
-   - `YT_PROXY` – URL of a **separately hosted** forward proxy (`http://user:pass@host:port` or `socks5://...`) if YouTube blocks the server IP (*"Failed to extract any player response"* / *"not a bot"*). Run `proxy/` on a **home** machine (see `proxy/README.md`); do not host that proxy on Render. All YouTube lookups and audio/video bytes go through it (~4 MB per song).
+   - `YT_PROXY` – residential proxy (`http://user:pass@host:port` or `socks5://...`) if YouTube blocks the server IP (*"Failed to extract any player response"* / *"not a bot"*). All YouTube lookups and audio/video bytes go through it, so it uses proxy bandwidth (~4 MB per song).
+   - `WEBSHARE_API_KEY` – Webshare.io token; the API loads your Webshare proxy list at startup (same YouTube path as `YT_PROXY`).
    - `YT_COOKIES` – if logs show *"Sign in to confirm you're not a bot"*. Export cookies.txt from a logged-in YouTube session (use a throwaway account) and paste its contents. Keep it secret.
 3. Check: `https://<service>.onrender.com/api/health` → `{"status":"ok"}`.
 
