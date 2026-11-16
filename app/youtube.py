@@ -5,11 +5,13 @@ import asyncio
 import re
 import shutil
 import tempfile
-import time
 import threading
+import time
 
 from dataclasses import dataclass
 from pathlib import Path
+
+import httpx
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
@@ -17,13 +19,15 @@ from yt_dlp.utils import DownloadError
 from .config import settings
 
 
-VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# ============================================================
+# BASIC HELPERS
+# ============================================================
 
-# ---------- basic helpers ----------
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 def is_valid_id(video_id: str) -> bool:
-    return bool(VIDEO_ID_RE.match(video_id))
+    return bool(VIDEO_ID_RE.fullmatch(video_id))
 
 
 def _watch_url(video_id: str) -> str:
@@ -31,18 +35,13 @@ def _watch_url(video_id: str) -> str:
 
 
 def _js_runtimes() -> dict:
-    """Find an available JavaScript runtime for yt-dlp."""
-
     for name in ("deno", "node", "bun"):
         if path := shutil.which(name):
             return {name: {"path": path}}
-
     return {}
 
 
 def _cookie_file() -> str | None:
-    """Create a temporary YouTube cookies file."""
-
     if not settings.yt_cookies.strip():
         return None
 
@@ -68,7 +67,9 @@ class _SilentLogger:
         pass
 
 
-# ---------- base yt-dlp options ----------
+# ============================================================
+# YT-DLP OPTIONS
+# ============================================================
 
 _BASE_OPTS = {
     "quiet": True,
@@ -83,7 +84,9 @@ if cookie_path := _cookie_file():
     _BASE_OPTS["cookiefile"] = cookie_path
 
 
-# ---------- Proxifly proxy management ----------
+# ============================================================
+# PROXIFLY CONFIGURATION
+# ============================================================
 
 PROXIFLY_URL = "https://api.proxifly.dev/get-proxy"
 
@@ -97,21 +100,61 @@ _cooldown_until: dict[str, float] = {}
 
 _COOLDOWN = 600
 
+# Number of Proxifly proxies to test during initial startup.
+_INITIAL_PROXY_ATTEMPTS = 3
+
+# Number of fresh proxies to request after existing proxies fail.
+_REFRESH_PROXY_ATTEMPTS = 3
+
+
+# ============================================================
+# PROXIFLY PROXY VALIDATION
+# ============================================================
+
+def _test_proxy(proxy: str) -> bool:
+    """
+    Test whether a proxy can establish an HTTPS connection
+    to YouTube.
+
+    This tests actual connectivity instead of trusting
+    Proxifly's anonymity or HTTPS metadata.
+    """
+
+    try:
+        with httpx.Client(
+            proxy=proxy,
+            timeout=12,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+
+            response = client.get(
+                "https://www.youtube.com/generate_204"
+            )
+
+            if response.status_code != 204:
+                print(
+                    f"Proxy rejected: unexpected YouTube response "
+                    f"{response.status_code}"
+                )
+                return False
+
+        return True
+
+    except Exception as e:
+        print(f"Proxy HTTPS CONNECT test failed: {e}")
+        return False
+
 
 def _get_proxifly_proxy() -> str | None:
-    """
-    Fetch a proxy from Proxifly.
-
-    Supports SOCKS5, HTTP and HTTPS proxy URLs.
-    """
-
-    import httpx
+    """Fetch and validate one proxy from Proxifly."""
 
     try:
         response = httpx.get(
             PROXIFLY_URL,
             timeout=15,
             follow_redirects=True,
+            trust_env=False,
         )
 
         response.raise_for_status()
@@ -119,35 +162,44 @@ def _get_proxifly_proxy() -> str | None:
         data = response.json()
 
         proxy = data.get("proxy")
+        protocol = (data.get("protocol") or "").lower()
+        anonymity = (data.get("anonymity") or "").lower()
 
         if not proxy:
             print("Proxifly returned an empty proxy")
             return None
 
-        protocol = data.get("protocol", "").lower()
-
-        if protocol not in ("socks5", "socks5h", "http", "https"):
-            print(f"Unsupported Proxifly protocol: {protocol}")
+        if protocol not in ("http", "https", "socks5", "socks5h"):
+            print(f"Unsupported proxy protocol: {protocol}")
             return None
 
         if not proxy.startswith(
-            ("socks5://", "socks5h://", "http://", "https://")
+            ("http://", "https://", "socks5://", "socks5h://")
         ):
-            print("Invalid Proxifly proxy URL")
+            print("Invalid proxy URL")
             return None
 
-        anonymity = data.get("anonymity", "unknown")
-
+        # Do not use proxies that explicitly identify themselves
+        # as transparent.
         if anonymity == "transparent":
             print(
-                "WARNING: Proxifly returned a transparent proxy. "
-                "It may expose your original IP."
+                f"Rejected transparent proxy: {data.get('ip')}"
             )
+            return None
 
         print(
-            f"Proxifly proxy received: "
+            f"Testing Proxifly proxy: "
             f"{data.get('ip')}:{data.get('port')} "
             f"({protocol}, {anonymity})"
+        )
+
+        if not _test_proxy(proxy):
+            print("Proxifly proxy failed HTTPS validation")
+            return None
+
+        print(
+            f"Validated Proxifly proxy: "
+            f"{data.get('ip')} ({protocol})"
         )
 
         return proxy
@@ -157,8 +209,17 @@ def _get_proxifly_proxy() -> str | None:
         return None
 
 
+def _add_proxy(proxy: str) -> None:
+    """Add a validated proxy without duplicates."""
+
+    with _proxy_lock:
+        if proxy not in PROXIES:
+            PROXIES.append(proxy)
+            print(f"Proxy pool size: {len(PROXIES)}")
+
+
 def _load_proxies() -> list[str]:
-    """Load environment proxies and fetch one Proxifly proxy."""
+    """Load configured proxies and fetch Proxifly proxies."""
 
     proxies = [
         p.strip()
@@ -166,38 +227,34 @@ def _load_proxies() -> list[str]:
         if p.strip()
     ]
 
-    proxifly_proxy = _get_proxifly_proxy()
+    for proxy in proxies:
+        if not _test_proxy(proxy):
+            print(f"Configured proxy failed validation: {proxy}")
 
-    if proxifly_proxy and proxifly_proxy not in proxies:
-        proxies.append(proxifly_proxy)
+    proxies = [
+        p for p in proxies if _test_proxy(p)
+    ]
+
+    for _ in range(_INITIAL_PROXY_ATTEMPTS):
+        proxy = _get_proxifly_proxy()
+
+        if proxy and proxy not in proxies:
+            proxies.append(proxy)
+
+        if len(proxies) >= _INITIAL_PROXY_ATTEMPTS:
+            break
 
     return proxies
 
 
-def _refresh_proxies() -> str | None:
-    """
-    Fetch a fresh Proxifly proxy when the current proxy fails.
-    """
-
-    global _good
-
-    proxy = _get_proxifly_proxy()
-
-    if not proxy:
-        return None
-
-    with _proxy_lock:
-        if proxy not in PROXIES:
-            PROXIES.append(proxy)
-            print(f"Added new proxy. Total proxies: {len(PROXIES)}")
-
-        return proxy
-
-
 PROXIES = _load_proxies()
 
+print(f"Loaded {len(PROXIES)} working proxies")
 
-# ---------- proxy error detection ----------
+
+# ============================================================
+# PROXY ERROR DETECTION
+# ============================================================
 
 _BLOCK_HINTS = (
     "not a bot",
@@ -205,33 +262,60 @@ _BLOCK_HINTS = (
     "Failed to extract any player response",
     "HTTP Error 429",
     "HTTP Error 403",
+    "HTTP Error 400",
+    "400 Bad Request",
     "timed out",
     "ProxyError",
     "Tunnel connection failed",
     "Connection refused",
     "Connection reset",
     "Proxy connection failed",
+    "Unable to connect to proxy",
 )
 
 
 def _blocked(e: Exception) -> bool:
-    msg = str(e)
+    msg = str(e).lower()
 
-    return any(h.lower() in msg.lower() for h in _BLOCK_HINTS)
+    return any(
+        hint.lower() in msg
+        for hint in _BLOCK_HINTS
+    )
 
 
-# ---------- proxy failover ----------
+# ============================================================
+# PROXY FAILOVER AND ROTATION
+# ============================================================
+
+def _refresh_proxies() -> str | None:
+    """Fetch fresh proxies after current proxies fail."""
+
+    for _ in range(_REFRESH_PROXY_ATTEMPTS):
+        proxy = _get_proxifly_proxy()
+
+        if not proxy:
+            continue
+
+        with _proxy_lock:
+            if proxy in PROXIES:
+                continue
+
+            PROXIES.append(proxy)
+
+        return proxy
+
+    return None
 
 
 def _with_proxy(fn):
     """
-    Run fn(proxy).
+    Execute a yt-dlp operation using validated proxies.
 
-    1. Try the last working proxy first.
-    2. Skip proxies currently in cooldown.
-    3. Try remaining proxies.
-    4. Fetch a new Proxifly proxy if all fail.
-    5. Fall back to direct connection if no proxy is available.
+    Order:
+    1. Previously working proxy.
+    2. Other available proxies.
+    3. Fresh Proxifly proxies.
+    4. Direct connection only if no proxy was available.
     """
 
     global _good
@@ -241,7 +325,7 @@ def _with_proxy(fn):
         good = _good
 
     if not proxies:
-        print("No proxies available. Using direct connection.")
+        print("No validated proxies available; trying direct connection")
         return fn(None)
 
     now = time.time()
@@ -251,6 +335,7 @@ def _with_proxy(fn):
         for k in range(len(proxies))
     ]
 
+    # Prefer proxies outside cooldown.
     order.sort(
         key=lambda i: (
             _cooldown_until.get(proxies[i], 0) > now
@@ -258,92 +343,79 @@ def _with_proxy(fn):
     )
 
     attempted = set()
-    last: Exception | None = None
+    last_error: Exception | None = None
 
-    def attempt(proxy_list, indices):
-        nonlocal last
+    def attempt(proxy: str):
+        nonlocal last_error
 
-        for i in indices:
-            proxy = proxy_list[i]
+        attempted.add(proxy)
 
-            if proxy in attempted:
-                continue
-
-            attempted.add(proxy)
-
-            try:
-                result = fn(proxy)
-
-            except DownloadError as e:
-                if not _blocked(e):
-                    raise
-
-                print(f"Proxy failed: {proxy}")
-
-                _cooldown_until[proxy] = time.time() + _COOLDOWN
-
-                last = e
-                continue
-
-            except Exception:
-                raise
-
-            with _proxy_lock:
-                if proxy in PROXIES:
-                    _good = PROXIES.index(proxy)
-
-                _cooldown_until.pop(proxy, None)
-
-            print(f"Proxy working: {proxy}")
-
-            return True, result
-
-        return False, None
-
-    success, result = attempt(proxies, order)
-
-    if success:
-        return result
-
-    # All existing proxies failed. Request another proxy.
-    print("All proxies failed. Refreshing Proxifly...")
-
-    new_proxy = _refresh_proxies()
-
-    if new_proxy and new_proxy not in attempted:
         try:
-            result = fn(new_proxy)
+            result = fn(proxy)
 
         except DownloadError as e:
             if not _blocked(e):
                 raise
 
-            print(f"New Proxifly proxy failed: {new_proxy}")
+            print(f"Proxy failed: {proxy}")
 
-            _cooldown_until[new_proxy] = time.time() + _COOLDOWN
-
-            last = e
-
-        else:
             with _proxy_lock:
-                if new_proxy in PROXIES:
-                    _good = PROXIES.index(new_proxy)
+                _cooldown_until[proxy] = (
+                    time.time() + _COOLDOWN
+                )
 
-                _cooldown_until.pop(new_proxy, None)
+            last_error = e
+            return False, None
 
-            print("New Proxifly proxy working!")
+        with _proxy_lock:
+            if proxy in PROXIES:
+                _good = PROXIES.index(proxy)
 
+            _cooldown_until.pop(proxy, None)
+
+        print(f"Proxy request successful: {proxy}")
+
+        return True, result
+
+    # Try existing proxies.
+    for i in order:
+        proxy = proxies[i]
+
+        if _cooldown_until.get(proxy, 0) > time.time():
+            continue
+
+        success, result = attempt(proxy)
+
+        if success:
             return result
 
-    if last:
-        raise last
+    # Fetch fresh proxies if existing proxies failed.
+    print("Existing proxies failed. Refreshing Proxifly...")
 
-    raise RuntimeError("No working proxy available")
+    for _ in range(_REFRESH_PROXY_ATTEMPTS):
+        proxy = _refresh_proxies()
 
+        if not proxy or proxy in attempted:
+            continue
+
+        success, result = attempt(proxy)
+
+        if success:
+            return result
+
+    if last_error:
+        raise last_error
+
+    raise RuntimeError(
+        "No working Proxifly proxy available"
+    )
+
+
+# ============================================================
+# YT-DLP OPTIONS WITH PROXY
+# ============================================================
 
 def _opts(proxy: str | None, **extra) -> dict:
-    """Build yt-dlp options with optional proxy."""
-
     opts = {
         **_BASE_OPTS,
         **extra,
@@ -355,8 +427,9 @@ def _opts(proxy: str | None, **extra) -> dict:
     return opts
 
 
-# ---------- search ----------
-
+# ============================================================
+# YOUTUBE SEARCH
+# ============================================================
 
 def _search_sync(query: str, limit: int) -> list[dict]:
 
@@ -378,23 +451,27 @@ def _search_sync(query: str, limit: int) -> list[dict]:
 
     results = []
 
-    for e in info.get("entries") or []:
+    for entry in info.get("entries") or []:
 
-        vid = e.get("id")
+        video_id = entry.get("id")
 
-        if not vid or not is_valid_id(vid):
+        if not video_id or not is_valid_id(video_id):
             continue
 
         results.append(
             {
-                "id": vid,
-                "title": e.get("title"),
-                "artist": e.get("channel") or e.get("uploader"),
-                "duration": e.get("duration"),
-                "thumbnail": (
-                    f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                "id": video_id,
+                "title": entry.get("title"),
+                "artist": (
+                    entry.get("channel")
+                    or entry.get("uploader")
                 ),
-                "views": e.get("view_count"),
+                "duration": entry.get("duration"),
+                "thumbnail": (
+                    f"https://i.ytimg.com/vi/"
+                    f"{video_id}/hqdefault.jpg"
+                ),
+                "views": entry.get("view_count"),
             }
         )
 
@@ -409,8 +486,9 @@ async def search(query: str, limit: int) -> list[dict]:
     )
 
 
-# ---------- stream URL resolve ----------
-
+# ============================================================
+# AUDIO SOURCE
+# ============================================================
 
 @dataclass
 class AudioSource:
@@ -430,11 +508,17 @@ _cache: dict[tuple[str, str], AudioSource] = {}
 _resolve_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 
+# ============================================================
+# FORMAT SELECTION
+# ============================================================
+
 _FORMATS = {
     "audio": "bestaudio[ext=m4a]/bestaudio/best",
+
     "video": (
-        "18/best[ext=mp4][vcodec!=none][acodec!=none]"
-        "/best[vcodec!=none][acodec!=none]"
+        "18/"
+        "best[ext=mp4][vcodec!=none][acodec!=none]/"
+        "best[vcodec!=none][acodec!=none]"
     ),
 }
 
@@ -455,22 +539,28 @@ def _mime_for(ext: str | None, kind: str) -> str:
     }.get(ext or "", "application/octet-stream")
 
 
-# ---------- song metadata ----------
+# ============================================================
+# SONG METADATA
+# ============================================================
 
 _meta: dict[str, dict] = {}
 
 
 def _store_meta(video_id: str, info: dict) -> dict:
 
+    artists = info.get("artists") or []
+
     meta = {
         "title": info.get("title"),
         "track": info.get("track"),
-        "artist": (
-            info.get("artist")
-            or (info.get("artists") or [None])[0]
+        "artist": info.get("artist") or (
+            artists[0] if artists else None
         ),
         "album": info.get("album"),
-        "channel": info.get("channel") or info.get("uploader"),
+        "channel": (
+            info.get("channel")
+            or info.get("uploader")
+        ),
         "duration": info.get("duration"),
     }
 
@@ -513,8 +603,9 @@ async def get_meta(video_id: str) -> dict:
     )
 
 
-# ---------- resolve audio/video ----------
-
+# ============================================================
+# AUDIO / VIDEO RESOLUTION
+# ============================================================
 
 def _resolve_sync(video_id: str, kind: str) -> AudioSource:
 
@@ -540,21 +631,36 @@ def _resolve_sync(video_id: str, kind: str) -> AudioSource:
 
     return AudioSource(
         proxy=proxy,
+
         available_at=min(
             float(info.get("available_at") or 0) + 0.3,
             time.time() + 15,
         ),
+
         url=info["url"],
-        headers=dict(info.get("http_headers") or {}),
-        mime=_mime_for(info.get("ext"), kind),
+
+        headers=dict(
+            info.get("http_headers") or {}
+        ),
+
+        mime=_mime_for(
+            info.get("ext"),
+            kind,
+        ),
+
         title=info.get("title"),
+
         artist=(
             info.get("artist")
             or info.get("channel")
             or info.get("uploader")
         ),
+
         duration=info.get("duration"),
-        expires_at=time.time() + settings.stream_url_ttl,
+
+        expires_at=(
+            time.time() + settings.stream_url_ttl
+        ),
     )
 
 
@@ -564,14 +670,18 @@ async def resolve(
     bad: AudioSource | None = None,
 ) -> AudioSource:
     """
-    Resolve and cache a YouTube stream URL.
+    Resolve a cached audio/video URL.
 
-    Pass bad when the previous source returned HTTP 403.
+    Pass bad when the previous source returned HTTP 403
+    to force a fresh resolution.
     """
 
     key = (kind, video_id)
 
-    async with _resolve_locks.setdefault(key, asyncio.Lock()):
+    async with _resolve_locks.setdefault(
+        key,
+        asyncio.Lock(),
+    ):
 
         src = _cache.get(key)
 
@@ -597,8 +707,9 @@ async def resolve(
         return src
 
 
-# ---------- prefetch ----------
-
+# ============================================================
+# BACKGROUND PREFETCH
+# ============================================================
 
 _bg_tasks: set[asyncio.Task] = set()
 
@@ -609,8 +720,7 @@ def prefetch(
     video_id: str,
     kind: str = "audio",
 ) -> None:
-
-    """Resolve stream URLs in the background."""
+    """Resolve a stream URL in the background."""
 
     src = _cache.get((kind, video_id))
 
@@ -630,8 +740,8 @@ def prefetch(
             async with _prefetch_slots:
                 await resolve(video_id, kind)
 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Prefetch failed for {video_id}: {e}")
 
     task = asyncio.create_task(run())
 
@@ -640,22 +750,32 @@ def prefetch(
     task.add_done_callback(_bg_tasks.discard)
 
 
-# ---------- MP3 conversion ----------
-
+# ============================================================
+# MP3 CONVERSION
+# ============================================================
 
 _dl_locks: dict[str, asyncio.Lock] = {}
 
 
-def _convert_sync(video_id: str, out_dir: Path) -> Path:
+def _convert_sync(
+    video_id: str,
+    out_dir: Path,
+) -> Path:
 
     opts = {
         "format": "bestaudio/best",
-        "outtmpl": str(out_dir / f"{video_id}.%(ext)s"),
+
+        "outtmpl": str(
+            out_dir / f"{video_id}.%(ext)s"
+        ),
+
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": str(settings.mp3_bitrate),
+                "preferredquality": str(
+                    settings.mp3_bitrate
+                ),
             },
             {
                 "key": "FFmpegMetadata",
