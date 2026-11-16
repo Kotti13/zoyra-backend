@@ -81,7 +81,7 @@ def _webshare_proxies() -> list[str]:
             r.raise_for_status()
             data = r.json()
             out += [
-                f"http://{p['username']}:{p['password']}@{p['proxy_address']}:{p['port']}"
+                f"http://{'xhwydhbq'}:{'vz887p9m3fps'}@{p['proxy_address']}:{p['port']}"
                 for p in data.get("results", [])
                 if p.get("valid")
             ]
