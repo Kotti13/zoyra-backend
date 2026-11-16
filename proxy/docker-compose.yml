@@ -1,0 +1,15 @@
+services:
+  proxy:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+      - "1080:1080"
+    environment:
+      PROXY_HOST: "0.0.0.0"
+      PROXY_HTTP_PORT: "8888"
+      PROXY_SOCKS_PORT: "1080"
+      PROXY_USER: "${PROXY_USER:-zoyra}"
+      PROXY_PASSWORD: "${PROXY_PASSWORD:?set PROXY_PASSWORD in a .env next to this file}"
+      # Optional: lock to the API host IP (Render outbound IP, etc.)
+      # PROXY_ALLOW: "1.2.3.4"
