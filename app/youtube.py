@@ -81,7 +81,7 @@ def _webshare_proxies() -> list[str]:
             r.raise_for_status()
             data = r.json()
             out += [
-                f"http://{'xhwydhbq'}:{'vz887p9m3fps'}@{p['proxy_address']}:{p['port']}"
+                f"http://{p['username']}:{p['password']}@{p['proxy_address']}:{p['port']}"
                 for p in data.get("results", [])
                 if p.get("valid")
             ]
@@ -200,8 +200,8 @@ _resolve_locks: dict[tuple[str, str], asyncio.Lock] = {}
 # audio: prefer m4a (AAC) — plays natively in every browser incl. Safari/iOS.
 # video: single file with picture + sound (YouTube caps these at 360p; format 18).
 _FORMATS = {
-    "audio": "bestaudio[ext=m4a]/bestaudio/best",
-    "video": "18/best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]",
+    "audio": "bestaudio/best",
+    "video": "best[ext=mp4][vcodec!=none][acodec!=none]/best",
 }
 
 
