@@ -34,11 +34,18 @@ def _js_runtimes() -> dict:
 
 
 def _cookie_file() -> str | None:
-    if not settings.yt_cookies.strip():
+    raw = settings.yt_cookies
+    if settings.yt_cookies_file:
+        try:
+            raw = Path(settings.yt_cookies_file).read_text()
+        except OSError as e:
+            print(f"YT_COOKIES_FILE unreadable: {e}")
+    if not raw.strip():
         return None
     path = Path(tempfile.gettempdir()) / "zoyra_yt_cookies.txt"
+    # Copy to a writable temp file (yt-dlp rewrites it; secret files are read-only).
     # Env vars often lose newlines; accept literal "\n" too.
-    path.write_text(settings.yt_cookies.replace("\\n", "\n").strip() + "\n")
+    path.write_text(raw.replace("\\n", "\n").strip() + "\n")
     path.chmod(0o600)
     return str(path)
 

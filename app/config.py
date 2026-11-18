@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Optional: contents of a Netscape-format cookies.txt from a YouTube login.
     # Helps when YouTube blocks server IPs ("Sign in to confirm you're not a bot").
     yt_cookies: str = ""
+    # Optional: path to a cookies.txt file (e.g. Render Secret File /etc/secrets/cookies.txt).
+    # Easier than pasting multi-line text into YT_COOKIES.
+    yt_cookies_file: str = ""
     # Optional: proxy for all YouTube traffic, e.g. http://user:pass@host:port or socks5://...
     # Use a residential proxy — YouTube blocks datacenter IPs (Render, AWS, ...).
     yt_proxy: str = ""
