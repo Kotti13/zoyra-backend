@@ -1,3 +1,13 @@
+---
+title: Zoyra Music API
+emoji: 🎵
+colorFrom: purple
+colorTo: blue
+sdk: gradio
+app_file: gradio_app.py
+pinned: false
+---
+
 # Zoyra Music API
 
 FastAPI backend: search songs on YouTube, stream audio to the frontend, convert to mp3.
@@ -47,6 +57,18 @@ window.location.href = `${API}/api/download/${results[0].id}`;
 - Postman: import `zoyra.postman_collection.json`.
 - Stream URLs from YouTube are cached in memory (`STREAM_URL_TTL`) and re-resolved automatically on expiry (403).
 - Keep yt-dlp updated (`uv pip install -U yt-dlp`) — YouTube changes break old versions.
+
+## Deploy on Hugging Face Spaces (free, no card)
+1. huggingface.co → New Space → SDK **Gradio**, hardware **CPU basic (free)**. Create it.
+2. Push this repo to the Space (the YAML block at the top of this README is what Spaces reads; it runs `gradio_app.py`, installs `packages.txt` via apt and `requirements.txt` via pip, and downloads deno on first start):
+   ```bash
+   git remote add space https://huggingface.co/spaces/<user>/<space-name>
+   git push space main
+   ```
+3. Space → Settings → **Variables and secrets**: add `CORS_ORIGINS` (variable) and, if YouTube blocks the IP, `YT_COOKIES` (secret, paste the full cookies.txt text). `YT_COOKIES_FILE` does not apply here; Spaces has no secret files.
+4. Check: `https://<user>-<space-name>.hf.space/api/health` → `{"status":"ok"}`.
+
+Free Spaces sleep after ~48h idle (wake on first request) and the disk is wiped on restart, so `downloads/` is temporary.
 
 ## Deploy on Render
 1. New → Web Service → connect this repo. Runtime: **Docker** (uses `Dockerfile`, which installs ffmpeg + deno).
