@@ -267,6 +267,18 @@ wheels = [
 ]
 
 [[package]]
+name = "ytmusicapi"
+version = "1.12.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/32/f43664949ae6f56dc8cae7a66724fbc49eae192488c6acf78f9a673d351f/ytmusicapi-1.12.4.tar.gz", hash = "sha256:bb9e827aba9f9dac956583c9c9bb6de738a810721d449ab9fd4bb58457fd6d59", size = 683463, upload-time = "2026-11-17T14:55:22.618Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ac/36/dcd31faf354db266171a869ddc0026d568c801312f5fea790ebfb2e9bf68/ytmusicapi-1.12.4-py3-none-any.whl", hash = "sha256:6f2dd849f76850c8053cd40ecd7ae26e1195c0874463784a5203158a1ac453b0", size = 111615, upload-time = "2026-11-17T14:55:20.883Z" },
+]
+
+[[package]]
 name = "zoyra-backend"
 version = "0.1.0"
 source = { virtual = "." }
@@ -275,6 +287,7 @@ dependencies = [
     { name = "requests", extra = ["socks"] },
     { name = "yt-dlp" },
     { name = "yt-dlp-ejs" },
+    { name = "ytmusicapi" },
 ]
 
 [package.metadata]
@@ -283,4 +296,5 @@ requires-dist = [
     { name = "requests", extras = ["socks"], specifier = ">=2.34.2" },
     { name = "yt-dlp", specifier = ">=2026.10.26" },
     { name = "yt-dlp-ejs", specifier = ">=0.8.0" },
+    { name = "ytmusicapi", specifier = ">=1.12.4" },
 ]

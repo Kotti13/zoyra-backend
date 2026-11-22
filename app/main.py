@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from yt_dlp.utils import DownloadError
 
-from . import lyrics, youtube
+from . import lyrics, youtube, ytmusic
 from .config import settings
 
 @asynccontextmanager
@@ -86,6 +86,80 @@ async def search(
     for r in results[: settings.prefetch_count]:
         youtube.prefetch(r["id"])
     return {"query": q, "count": len(results), "results": results}
+
+
+def _with_links(request: Request, songs: list[dict]) -> list[dict]:
+    for s in songs:
+        s.update(_audio_links(request, s["id"]))
+    return songs
+
+
+def _ytm_fail(e: ytmusic.YTMusicError) -> HTTPException:
+    return HTTPException(502, f"YouTube Music request failed: {e}")
+
+
+@app.get("/api/ytm/search")
+async def ytm_search(
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=200),
+    kind: str = Query("songs", pattern="^(songs|artists|albums)$"),
+    limit: int = Query(20, ge=1),
+):
+    """YouTube Music search. kind=songs returns playable items (same shape as /api/search)."""
+    limit = min(limit, settings.max_search_results)
+    try:
+        results = await ytmusic.search(q.strip(), kind, limit)
+    except ytmusic.YTMusicError as e:
+        raise _ytm_fail(e) from e
+    if kind == "songs":
+        results = _with_links(request, [dict(r) for r in results])
+        for r in results[: settings.prefetch_count]:
+            youtube.prefetch(r["id"])
+    return {"query": q, "kind": kind, "count": len(results), "results": results}
+
+
+@app.get("/api/ytm/suggest")
+async def ytm_suggest(q: str = Query(..., min_length=1, max_length=100)):
+    try:
+        return {"query": q, "suggestions": await ytmusic.suggestions(q.strip())}
+    except ytmusic.YTMusicError as e:
+        raise _ytm_fail(e) from e
+
+
+@app.get("/api/ytm/next/{video_id}")
+async def ytm_next(video_id: str, request: Request, limit: int = Query(20, ge=1, le=50)):
+    """Radio / 'up next' queue for a song."""
+    _check_id(video_id)
+    try:
+        tracks = await ytmusic.up_next(video_id, limit)
+    except ytmusic.YTMusicError as e:
+        raise _ytm_fail(e) from e
+    tracks = _with_links(request, [dict(t) for t in tracks])
+    return {"id": video_id, "count": len(tracks), "results": tracks}
+
+
+@app.get("/api/ytm/artist/{channel_id}")
+async def ytm_artist(channel_id: str, request: Request):
+    if not ytmusic.is_valid_id(channel_id):
+        raise HTTPException(400, "Invalid artist id")
+    try:
+        data = dict(await ytmusic.artist(channel_id))
+    except ytmusic.YTMusicError as e:
+        raise _ytm_fail(e) from e
+    data["songs"] = _with_links(request, [dict(s) for s in data["songs"]])
+    return data
+
+
+@app.get("/api/ytm/album/{browse_id}")
+async def ytm_album(browse_id: str, request: Request):
+    if not ytmusic.is_valid_id(browse_id):
+        raise HTTPException(400, "Invalid album id")
+    try:
+        data = dict(await ytmusic.album(browse_id))
+    except ytmusic.YTMusicError as e:
+        raise _ytm_fail(e) from e
+    data["tracks"] = _with_links(request, [dict(t) for t in data["tracks"]])
+    return data
 
 
 @app.post("/api/prefetch/{video_id}", status_code=202)
